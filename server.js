@@ -4,65 +4,162 @@ const jwt = require("jsonwebtoken");
 const cors = require("cors");
 
 const app = express();
-const PORT = 3000;
-const SECRET_KEY = "rahsia_e_relief_key";
+const PORT = process.env.PORT || 3000;
+const SECRET_KEY = process.env.SECRET_KEY || "rahsia_e_relief_key";
 
+// 1. Middlewares
 app.use(cors());
 app.use(express.json());
 
+// 2. Database Connection & Schema Setup
 const db = new sqlite3.Database("./database.db", (err) => {
-    if (err) console.error("Ralat SQLite:", err.message);
-    else console.log("Berjaya bersambung ke SQLite.");
+    if (err) {
+        console.error("Ralat SQLite:", err.message);
+    } else {
+        console.log("Berjaya bersambung ke SQLite.");
+        // Aktifkan sokongan Foreign Key
+        db.run("PRAGMA foreign_keys = ON;");
+    }
 });
 
 db.serialize(() => {
-    db.run("CREATE TABLE IF NOT EXISTS teachers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, session TEXT, max_relief INTEGER, tags TEXT)");
-    db.run("CREATE TABLE IF NOT EXISTS reliefs (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, time_slot TEXT, class_name TEXT, subject TEXT, original_teacher_id INTEGER, relief_teacher_id INTEGER, status TEXT)");
+    db.run(`
+        CREATE TABLE IF NOT EXISTS teachers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            name TEXT NOT NULL, 
+            session TEXT DEFAULT 'Pagi', 
+            max_relief INTEGER DEFAULT 3, 
+            tags TEXT
+        )
+    `);
+
+    db.run(`
+        CREATE TABLE IF NOT EXISTS reliefs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            date TEXT NOT NULL, 
+            time_slot TEXT NOT NULL, 
+            class_name TEXT NOT NULL, 
+            subject TEXT, 
+            original_teacher_id INTEGER, 
+            relief_teacher_id INTEGER, 
+            status TEXT DEFAULT 'confirmed',
+            FOREIGN KEY (original_teacher_id) REFERENCES teachers(id) ON DELETE SET NULL,
+            FOREIGN KEY (relief_teacher_id) REFERENCES teachers(id) ON DELETE SET NULL
+        )
+    `);
 });
 
+// 3. JWT Verification Middleware
 function verifyToken(req, res, next) {
     const authHeader = req.headers["authorization"];
     const token = authHeader && authHeader.split(" ")[1];
-    if (!token) return res.status(401).json({ error: "Akses ditolak." });
+    if (!token) return res.status(401).json({ error: "Akses ditolak. Token tidak disediakan." });
 
     jwt.verify(token, SECRET_KEY, (err, user) => {
-        if (err) return res.status(403).json({ error: "Token tidak sah." });
+        if (err) return res.status(403).json({ error: "Token tidak sah atau telah luput." });
         req.user = user;
         next();
     });
 }
 
+// 4. API Routes
+
+// Route Asas (Healthcheck)
+app.get('/', (req, res) => {
+    res.send('Pelayan API Relief Pintar Berjalan dengan Jayanya!');
+});
+
+// Auth Login
 app.post("/api/login", (req, res) => {
     const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ error: "Sila berikan nama pengguna dan kata laluan." });
+    }
+
     if (username === "admin" && password === "admin123") {
         const token = jwt.sign({ username }, SECRET_KEY, { expiresIn: "8h" });
         return res.json({ status: "success", token });
     }
-    res.status(401).json({ error: "Log masuk gagal." });
+    res.status(401).json({ error: "Log masuk gagal. Nama pengguna atau kata laluan salah." });
 });
 
+// ==================== GURU (TEACHERS) ====================
+
+// GET: Semua Guru
 app.get("/api/teachers", verifyToken, (req, res) => {
-    db.all("SELECT * FROM teachers", [], (err, rows) => {
+    db.all("SELECT * FROM teachers ORDER BY name ASC", [], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
 });
 
-app.post("/api/teachers", verifyToken, (req, res) => {
-    const { name, session, max_relief, tags } = req.body;
-    db.run("INSERT INTO teachers (name, session, max_relief, tags) VALUES (?, ?, ?, ?)", [name, session, max_relief, tags], function (err) {
+// GET: Guru Mengikut ID
+app.get("/api/teachers/:id", verifyToken, (req, res) => {
+    const { id } = req.params;
+    db.get("SELECT * FROM teachers WHERE id = ?", [id], (err, row) => {
         if (err) return res.status(500).json({ error: err.message });
-        res.json({ status: "success", id: this.lastID });
+        if (!row) return res.status(404).json({ error: "Guru tidak dijumpai." });
+        res.json(row);
     });
 });
 
+// POST: Tambah Guru Baru
+app.post("/api/teachers", verifyToken, (req, res) => {
+    const { name, session, max_relief, tags } = req.body;
+    if (!name) return res.status(400).json({ error: "Nama guru adalah wajib." });
+
+    db.run(
+        "INSERT INTO teachers (name, session, max_relief, tags) VALUES (?, ?, ?, ?)", 
+        [name, session || "Pagi", max_relief || 3, tags || ""], 
+        function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+            res.status(201).json({ status: "success", id: this.lastID, message: "Guru berjaya ditambah." });
+        }
+    );
+});
+
+// PUT: Kemaskini Guru
+app.put("/api/teachers/:id", verifyToken, (req, res) => {
+    const { id } = req.params;
+    const { name, session, max_relief, tags } = req.body;
+
+    if (!name) return res.status(400).json({ error: "Nama guru adalah wajib." });
+
+    db.run(
+        "UPDATE teachers SET name = ?, session = ?, max_relief = ?, tags = ? WHERE id = ?",
+        [name, session, max_relief, tags, id],
+        function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+            if (this.changes === 0) return res.status(404).json({ error: "Guru tidak dijumpai." });
+            res.json({ status: "success", message: "Maklumat guru berjaya dikemaskini." });
+        }
+    );
+});
+
+// DELETE: Padam Guru
+app.delete("/api/teachers/:id", verifyToken, (req, res) => {
+    const { id } = req.params;
+    db.run("DELETE FROM teachers WHERE id = ?", [id], function (err) {
+        if (err) return res.status(500).json({ error: err.message });
+        if (this.changes === 0) return res.status(404).json({ error: "Guru tidak dijumpai." });
+        res.json({ status: "success", message: "Guru berjaya dipadam." });
+    });
+});
+
+// ==================== GENERATOR RELIEF ====================
+
 app.post("/api/generate-relief", verifyToken, (req, res) => {
     const { slot, date, availableTeachers } = req.body;
+
+    if (!Array.isArray(availableTeachers) || availableTeachers.length === 0) {
+        return res.status(400).json({ status: "failed", message: "Tiada guru luang disediakan." });
+    }
+
     let bestCandidate = null;
     let highestScore = -999;
 
     availableTeachers.forEach(candidate => {
-        let score = 100 - (candidate.current_load * 10);
+        let score = 100 - ((candidate.current_load || 0) * 10);
         if (score > highestScore) {
             highestScore = score;
             bestCandidate = candidate;
@@ -72,33 +169,122 @@ app.post("/api/generate-relief", verifyToken, (req, res) => {
     if (bestCandidate) {
         res.json({ status: "success", assigned_to: bestCandidate, score: highestScore });
     } else {
-        res.json({ status: "failed", message: "Tiada guru luang." });
+        res.json({ status: "failed", message: "Tiada calon guru yang sesuai." });
     }
 });
 
+// ==================== JADUAL RELIEF ====================
+
+// POST: Simpan Senarai Relief (dengan Transaksi)
 app.post("/api/reliefs", verifyToken, (req, res) => {
     const { reliefs } = req.body;
-    if (!reliefs || !Array.isArray(reliefs)) return res.status(400).json({ error: "Data tidak sah." });
+    if (!reliefs || !Array.isArray(reliefs) || reliefs.length === 0) {
+        return res.status(400).json({ error: "Data reliefs tidak sah atau kosong." });
+    }
 
-    const stmt = db.prepare("INSERT INTO reliefs (date, time_slot, class_name, subject, original_teacher_id, relief_teacher_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)");
     db.serialize(() => {
-        reliefs.forEach(r => {
-            stmt.run(r.date, r.time, r.class, r.subject, r.original, r.relief, "confirmed");
-        });
-        stmt.finalize();
-    });
+        db.run("BEGIN TRANSACTION");
 
-    res.json({ status: "success", message: "Jadual relief disimpan!" });
+        const stmt = db.prepare(
+            "INSERT INTO reliefs (date, time_slot, class_name, subject, original_teacher_id, relief_teacher_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        );
+
+        let hasError = null;
+
+        reliefs.forEach(r => {
+            stmt.run(
+                [
+                    r.date, 
+                    r.time || r.time_slot, 
+                    r.class || r.class_name, 
+                    r.subject, 
+                    r.original || r.original_teacher_id, 
+                    r.relief || r.relief_teacher_id, 
+                    r.status || "confirmed"
+                ],
+                (err) => {
+                    if (err) hasError = err;
+                }
+            );
+        });
+
+        stmt.finalize((err) => {
+            if (err || hasError) {
+                db.run("ROLLBACK");
+                return res.status(500).json({ error: "Gagal menyimpan reliefs: " + (err || hasError).message });
+            }
+            db.run("COMMIT");
+            res.json({ status: "success", message: "Jadual relief berjaya disimpan!" });
+        });
+    });
 });
 
+// GET: Senarai Relief (Dengan Nama Guru dari LEFT JOIN)
 app.get("/api/reliefs", verifyToken, (req, res) => {
     const { date } = req.query;
-    db.all("SELECT * FROM reliefs WHERE date = ?", [date], (err, rows) => {
+    
+    let query = `
+        SELECT 
+            r.id,
+            r.date,
+            r.time_slot,
+            r.class_name,
+            r.subject,
+            r.status,
+            r.original_teacher_id,
+            t1.name AS original_teacher_name,
+            r.relief_teacher_id,
+            t2.name AS relief_teacher_name
+        FROM reliefs r
+        LEFT JOIN teachers t1 ON r.original_teacher_id = t1.id
+        LEFT JOIN teachers t2 ON r.relief_teacher_id = t2.id
+    `;
+    
+    let params = [];
+
+    if (date) {
+        query += " WHERE r.date = ?";
+        params.push(date);
+    }
+
+    query += " ORDER BY r.time_slot ASC";
+
+    db.all(query, params, (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
 });
 
+// PUT: Kemaskini Status Relief
+app.put("/api/reliefs/:id/status", verifyToken, (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!status) return res.status(400).json({ error: "Status adalah wajib." });
+
+    db.run("UPDATE reliefs SET status = ? WHERE id = ?", [status, id], function (err) {
+        if (err) return res.status(500).json({ error: err.message });
+        if (this.changes === 0) return res.status(404).json({ error: "Rekod relief tidak dijumpai." });
+        res.json({ status: "success", message: "Status relief berjaya dikemaskini." });
+    });
+});
+
+// DELETE: Padam Rekod Relief
+app.delete("/api/reliefs/:id", verifyToken, (req, res) => {
+    const { id } = req.params;
+    db.run("DELETE FROM reliefs WHERE id = ?", [id], function (err) {
+        if (err) return res.status(500).json({ error: err.message });
+        if (this.changes === 0) return res.status(404).json({ error: "Rekod relief tidak dijumpai." });
+        res.json({ status: "success", message: "Rekod relief berjaya dipadam." });
+    });
+});
+
+// 5. Catch-all 404 Handler
+app.use((req, res) => {
+    res.status(404).json({ error: "Laluan tidak dijumpai (404 Not Found)." });
+});
+
+// 6. Start Server
 app.listen(PORT, () => {
-    console.log("[API Server] Pelayan e-Relief AKTIF di http://localhost:" + PORT);
+    console.log(`[API Server] Pelayan e-Relief AKTIF di http://localhost:${PORT}`);
 });
