@@ -156,7 +156,18 @@ app.put("/api/teachers/:id", verifyToken, (req, res) => {
   );
 });
 
-// DELETE: Padam Guru
+// DELETE: Padam Semua Guru (Reset Senarai Guru)
+app.delete("/api/teachers", verifyToken, (req, res) => {
+  db.run("DELETE FROM teachers", [], function (err) {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({
+      status: "success",
+      message: "Semua senarai guru berjaya dipadam.",
+    });
+  });
+});
+
+// DELETE: Padam Guru Mengikut ID
 app.delete("/api/teachers/:id", verifyToken, (req, res) => {
   const { id } = req.params;
   db.run("DELETE FROM teachers WHERE id = ?", [id], function (err) {
@@ -202,8 +213,8 @@ app.post("/api/generate-relief", verifyToken, (req, res) => {
 
 // ==================== JADUAL RELIEF ====================
 
-// GET: Ambil Semua Jadual Relief (dengan gabungan nama guru)
-app.get("/api/reliefs", verifyToken, (req, res) => {
+// Handler Ambil Rekod Relief (Menyokong /api/relief dan /api/reliefs)
+const handleGetReliefs = (req, res) => {
   const query = `
         SELECT 
             r.*, 
@@ -219,12 +230,16 @@ app.get("/api/reliefs", verifyToken, (req, res) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(rows);
   });
-});
+};
 
-// POST: Simpan Senarai Relief (dengan Transaksi)
-app.post("/api/reliefs", verifyToken, (req, res) => {
-  const { reliefs } = req.body;
-  if (!reliefs || !Array.isArray(reliefs) || reliefs.length === 0) {
+app.get("/api/relief", verifyToken, handleGetReliefs);
+app.get("/api/reliefs", verifyToken, handleGetReliefs);
+
+// Handler Simpan Senarai Relief (Menyokong 'records' atau 'reliefs' dalam payload)
+const handlePostReliefs = (req, res) => {
+  const reliefData = req.body.records || req.body.reliefs;
+
+  if (!reliefData || !Array.isArray(reliefData) || reliefData.length === 0) {
     return res
       .status(400)
       .json({ error: "Data reliefs tidak sah atau kosong." });
@@ -239,7 +254,7 @@ app.post("/api/reliefs", verifyToken, (req, res) => {
 
     let errorOccurred = false;
 
-    reliefs.forEach((r) => {
+    reliefData.forEach((r) => {
       if (errorOccurred) return;
 
       stmt.run(
@@ -283,10 +298,13 @@ app.post("/api/reliefs", verifyToken, (req, res) => {
       });
     });
   });
-});
+};
 
-// DELETE: Padam Rekod Relief Mengikut ID
-app.delete("/api/reliefs/:id", verifyToken, (req, res) => {
+app.post("/api/relief", verifyToken, handlePostReliefs);
+app.post("/api/reliefs", verifyToken, handlePostReliefs);
+
+// Handler Padam Rekod Relief Mengikut ID
+const handleDeleteRelief = (req, res) => {
   const { id } = req.params;
   db.run("DELETE FROM reliefs WHERE id = ?", [id], function (err) {
     if (err) return res.status(500).json({ error: err.message });
@@ -294,7 +312,10 @@ app.delete("/api/reliefs/:id", verifyToken, (req, res) => {
       return res.status(404).json({ error: "Rekod relief tidak dijumpai." });
     res.json({ status: "success", message: "Rekod relief berjaya dipadam." });
   });
-});
+};
+
+app.delete("/api/relief/:id", verifyToken, handleDeleteRelief);
+app.delete("/api/reliefs/:id", verifyToken, handleDeleteRelief);
 
 // 5. Jalankan Pelayan (Server)
 app.listen(PORT, () => {
