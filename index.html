@@ -748,7 +748,7 @@ input:focus, select:focus { border-color: var(--primary-2); box-shadow: 0 0 0 3p
 <!-- FIREBASE SDK & SKRIP UTAMA (ESM MODULE) -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-import { getFirestore, collection, getDocs, addDoc, deleteDoc, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+import { getFirestore, collection, getDocs, addDoc, deleteDoc, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
 // KONFIGURASI FIREBASE ANDA (Sila ganti dengan butiran projek anda dari Firebase Console)
 const firebaseConfig = {
@@ -820,12 +820,45 @@ function loadTimetableFromStorage(){
     } catch(e) {
         window.slotSubjectMap = {};
     }
+    try {
+        window.classSubjectMap = JSON.parse(localStorage.getItem("classSubjectMap")) || {};
+    } catch(e) {
+        window.classSubjectMap = {};
+    }
+}
+// ===== Simpanan Firestore (koleksi "config") — dikongsi antara semua pengguna & peranti =====
+// localStorage kekal sebagai salinan cache setempat sahaja.
+async function loadConfigDoc(name){
+    const snap = await getDoc(doc(db, "config", name));
+    return snap.exists() ? snap.data() : null;
+}
+async function saveConfigDoc(name, data){
+    try {
+        await setDoc(doc(db, "config", name), data);
+        return true;
+    } catch(err) {
+        console.error(`Gagal menyimpan config/${name}:`, err);
+        showToast("Gagal menyimpan ke Firestore. Semak Firestore rules untuk koleksi 'config'.");
+        return false;
+    }
+}
+function saveListsToCloud(){
+    return saveConfigDoc("lists", { classes: window.schoolClasses, periods: window.periods, subjects: window.schoolSubjects });
+}
+function saveMappingsToCloud(){
+    localStorage.setItem("classSubjectMap", JSON.stringify(window.classSubjectMap));
+    return saveConfigDoc("mappings", {
+        classSubjectMap: JSON.stringify(window.classSubjectMap),
+        slotSubjectMap: JSON.stringify(window.slotSubjectMap)
+    });
 }
 function saveTimetableToStorage(){
     localStorage.setItem("teacherTimetable", JSON.stringify(window.teacherTimetable));
+    return saveConfigDoc("timetable", { data: JSON.stringify(window.teacherTimetable) });
 }
 function saveSlotSubjectMapToStorage(){
     localStorage.setItem("slotSubjectMap", JSON.stringify(window.slotSubjectMap));
+    return saveMappingsToCloud();
 }
 
 // Tetapan Sistem — simpan & muat semula supaya kekal selepas refresh
@@ -850,7 +883,7 @@ window.saveSystemSettings = function(){
     };
     document.getElementById("schoolName").value = settings.schoolName;
     localStorage.setItem("systemSettings", JSON.stringify(settings));
-    showToast("Tetapan disimpan.");
+    saveConfigDoc("settings", settings).then(ok => { if(ok) showToast("Tetapan disimpan."); });
 }
 
 // Tukar julat masa (cth "07:30–08:00") kepada minit sejak tengah malam, untuk susunan kronologi
@@ -915,6 +948,43 @@ async function loadDataFromFirestore() {
             window.schoolClasses = defaultClasses;
         } else {
             window.schoolClasses = classSnap.docs.map(d => d.data().value);
+        }
+
+        // 6. Config dikongsi: senarai kelas/slot masa/subjek, pemetaan, jadual waktu & tetapan
+        const lists = await loadConfigDoc("lists");
+        if (lists) {
+            if (Array.isArray(lists.classes)) window.schoolClasses = lists.classes;
+            if (Array.isArray(lists.periods)) window.periods = lists.periods;
+            if (Array.isArray(lists.subjects)) window.schoolSubjects = lists.subjects;
+            sortPeriods();
+        } else {
+            await saveListsToCloud(); // pindahkan senarai semasa (termasuk data asal) ke config
+        }
+
+        const mappings = await loadConfigDoc("mappings");
+        if (mappings) {
+            try { window.classSubjectMap = JSON.parse(mappings.classSubjectMap || "{}"); } catch(e) {}
+            try { window.slotSubjectMap = JSON.parse(mappings.slotSubjectMap || "{}"); } catch(e) {}
+            localStorage.setItem("classSubjectMap", JSON.stringify(window.classSubjectMap));
+            localStorage.setItem("slotSubjectMap", JSON.stringify(window.slotSubjectMap));
+        } else if (Object.keys(window.classSubjectMap).length || Object.keys(window.slotSubjectMap).length) {
+            await saveMappingsToCloud(); // pindahkan data setempat sedia ada
+        }
+
+        const tt = await loadConfigDoc("timetable");
+        if (tt) {
+            try { window.teacherTimetable = JSON.parse(tt.data || "{}"); } catch(e) {}
+            localStorage.setItem("teacherTimetable", JSON.stringify(window.teacherTimetable));
+        } else if (Object.keys(window.teacherTimetable).length) {
+            await saveTimetableToStorage();
+        }
+
+        const settings = await loadConfigDoc("settings");
+        if (settings) {
+            localStorage.setItem("systemSettings", JSON.stringify(settings));
+            loadSystemSettings();
+        } else if (localStorage.getItem("systemSettings")) {
+            await saveConfigDoc("settings", JSON.parse(localStorage.getItem("systemSettings")));
         }
 
         refreshUI();
@@ -1329,15 +1399,15 @@ window.closeSubjectModal = function(){ document.getElementById("subjectModal").c
 window.addNewSubject = async function(){
     const val = document.getElementById("newSubjectName").value.trim();
     if(!val) return;
-    await addDoc(collection(db, "subjects"), { value: val });
     window.schoolSubjects.push(val);
+    await saveListsToCloud();
     renderSubjectListTable(); closeSubjectModal();
     document.getElementById("newSubjectName").value = "";
     showToast("Subjek ditambah.");
 }
 window.deleteSubject = async function(idx){
     window.schoolSubjects.splice(idx, 1);
-    // Simplified: re-render table
+    await saveListsToCloud();
     renderSubjectListTable(); showToast("Subjek dipadam.");
 }
 function renderSubjectListTable(){
@@ -1393,6 +1463,7 @@ window.addNewTimeSlot = async function(){
     sortPeriods();
 
     saveSlotSubjectMapToStorage();
+    saveListsToCloud();
     renderTimeSlotListTable(); renderTeacherSchedule(); closeTimeSlotModal();
     document.getElementById("newTimeSlotValue").value = "";
 }
@@ -1401,6 +1472,7 @@ window.deleteTimeSlot = function(idx){
     window.periods.splice(idx, 1);
     delete window.slotSubjectMap[val];
     saveSlotSubjectMapToStorage();
+    saveListsToCloud();
     renderTimeSlotListTable(); renderTeacherSchedule(); showToast("Slot masa dipadam.");
 }
 function renderTimeSlotListTable(){
@@ -1458,6 +1530,8 @@ window.addNewClass = async function(){
     }
 
     window.classSubjectMap[val] = checkedSubjects;
+    saveMappingsToCloud();
+    saveListsToCloud();
     renderClassListTable();
     renderTeacherSchedule();
     closeClassModal();
@@ -1468,6 +1542,8 @@ window.deleteClass = function(idx){
     const className = window.schoolClasses[idx];
     window.schoolClasses.splice(idx, 1);
     delete window.classSubjectMap[className];
+    saveMappingsToCloud();
+    saveListsToCloud();
     renderClassListTable(); showToast("Kelas dipadam.");
 }
 function renderClassListTable(){
